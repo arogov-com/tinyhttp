@@ -1,3 +1,5 @@
+// Copyright (C) 2024 Aleksei Rogov <alekzzzr@gmail.com>. All rights reserved.
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +19,10 @@
 
 
 uint8_t verbose = 0;
+char root[PATH_MAX] = {0};
+struct MAP config = {.objects = NULL, .length = 0};
 
-int response(int code, int sock, char *data, unsigned int data_len) {
+int response(int code, int sock, char *data, unsigned int data_len, char *content_type) {
     if(sock <= 0) {
         return -1;
     }
@@ -35,8 +39,8 @@ int response(int code, int sock, char *data, unsigned int data_len) {
     int r = snprintf(send_buff, SEND_BUFFER_SIZE, "HTTP/1.1 %s\r\n\
 Server: %s\r\n\
 Content-Length: %i\r\n\
-Content-Type: text/html\r\n\
-Connection: keep-alive\r\n\r\n", responses[code], SERVER_NAME, data_len);
+Content-Type: %s\r\n\
+Connection: keep-alive\r\n\r\n", responses[code].msg, SERVER_NAME, data_len, content_type);
 
     memcpy(send_buff + r, data, data_len);
     send(sock, send_buff, r + data_len, 0);
@@ -50,53 +54,84 @@ void http_get(request_t *req, struct MAP *map, int sock, char *data, size_t data
         printf("\"GET %s %s\" ", req->path, req->version);
     }
 
-    if(*req->path == '/') {
-        ++req->path;
-    }
-
-    int file = open(req->path, O_RDONLY);
-    if(file < 0) {
-        response(RESPONSE_404, sock, "404 not found", 13);
-    }
-
-    char *file_buff = malloc(FILE_BUFFER_SIZE);
-    if(file_buff == NULL) {
-        printf("malloc error ");
-        return;
-    }
-
-    int rd = read(file, file_buff, FILE_BUFFER_SIZE);
-    if(rd > 0) {
-        int rsz = response(RESPONSE_200, sock, file_buff, rd);
-        if(verbose) {
-            printf("200 %i ", rsz);
-        }
-    }
-    else {
-        int rsz = response(RESPONSE_500, sock, "500 Internal Server Error", 25);
+    char *file_path = malloc(PATH_MAX);
+    if(file_path == NULL) {
+        int rsz = response(RESPONSE_500, sock, responses[RESPONSE_500].msg, responses[RESPONSE_500].msg_len, "text/html");
         if(verbose) {
             printf("500 %i ", rsz);
         }
+        return;
     }
 
-    if(verbose) {
-        char user_agent[256];
-        int user_agent_len = map_get(map, "User-Agent", 10, user_agent, 256);
-        user_agent[user_agent_len] = 0;
-        printf("\"%s\"", user_agent);
+    char *pt = stpcpy(file_path, root);
+    struct CONFIG_PATH config_path;
+    if(map_get(&config, req->path, strlen(req->path), &config_path, sizeof(struct CONFIG_PATH)) > 0) {
+        if(config_path.action[0] != '$') {
+            strcpy(pt, config_path.action);
+        }
+    }
+    else if(map_get(&config, req->path, strrchr(req->path, '/') - req->path + 1, &config_path, sizeof(struct CONFIG_PATH)) > 0) {
+        if(strcmp(config_path.action, "fastcgi") != 0 ) {
+            strcpy(pt, req->path + 1);
+        }
+    }
+    else {
+        int rsz = response(RESPONSE_403, sock, responses[RESPONSE_403].msg, responses[RESPONSE_403].msg_len, "text/html");
+        if(verbose) {
+            printf("403 %i ", rsz);
+        }
+        free(file_path);
+        return;
     }
 
-    char connection[64];
-    int qr = map_get(map, "Connection", 10, connection, sizeof(connection));
-    if(qr > 0) {
-        connection[qr] = 0;
-        if(memcmp(connection, "close", 6) == 0) {
-            close(sock);
+    if(strcmp(config_path.action, "fastcgi") != 0 ) {
+        int file = open(file_path, O_RDONLY);
+        if(file < 0) {
+            int rsz = response(RESPONSE_404, sock, responses[RESPONSE_404].msg, responses[RESPONSE_404].msg_len, "text/html");
+            if(verbose) {
+                printf("404 %i ", rsz);
+            }
+            free(file_path);
+            return;
+        }
+
+        char *file_buff = malloc(FILE_BUFFER_SIZE);
+        if(file_buff == NULL) {
+            int rsz = response(RESPONSE_500, sock, responses[RESPONSE_500].msg, responses[RESPONSE_500].msg_len, "text/html");
+            if(verbose) {
+                printf("500 %i ", rsz);
+            }
+            close(file);
+            free(file_path);
+            return;
+        }
+
+        int rd = read(file, file_buff, FILE_BUFFER_SIZE);
+        if(rd > 0) {
+            int rsz = response(RESPONSE_200, sock, file_buff, rd, config_path.content_type);
+            if(verbose) {
+                printf("200 %i ", rsz);
+            }
+        }
+        else {
+            int rsz = response(RESPONSE_500, sock, responses[RESPONSE_500].msg, responses[RESPONSE_500].msg_len, "text/html");
+            if(verbose) {
+                printf("500 %i ", rsz);
+            }
+        }
+
+        close(file);
+        free(file_buff);
+    }
+    else {
+        int rsz = response(RESPONSE_502, sock, responses[RESPONSE_502].msg, responses[RESPONSE_502].msg_len, "text/html");
+        if(verbose) {
+            // Execute command, and return stdout
+            printf("502 %i ", rsz);
         }
     }
 
-    free(file_buff);
-    close(file);
+    free(file_path);
 }
 
 void http_post(request_t *req, struct MAP *map, int sock, char *data, size_t data_len) {
@@ -138,7 +173,7 @@ int http_request(char *data, int data_length, int sock) {
     }
 
     char *tmp = memchr(data, ' ', length);
-    if(tmp == NULL) {
+    if(tmp == NULL || tmp == data || *data != '/') {
         if(verbose) {
             printf("invalid path ");
         }
@@ -167,6 +202,7 @@ int http_request(char *data, int data_length, int sock) {
     *tmp = 0;
     length -= tmp - data + 2;
     data = tmp + 2;
+
     if(*(uint64_t *)req.version != HTTP11_SIGNATURE) {
         if(verbose) {
             printf("protocol %s unsupported ", req.version);
@@ -235,8 +271,63 @@ int http_request(char *data, int data_length, int sock) {
             return REQUEST_METHOD_UNSUPPORTED;
     }
 
+    if(verbose) {
+        char user_agent[256];
+        int user_agent_len = map_get(&map, "User-Agent", 10, user_agent, sizeof(user_agent));
+        user_agent[user_agent_len] = 0;
+        printf("\"%s\"", user_agent);
+    }
+
+    char connection[64];
+    int qr = map_get(&map, "Connection", 10, connection, sizeof(connection));
+    if(qr > 0) {
+        connection[qr] = 0;
+        if(memcmp(connection, "close", 6) == 0 || memcmp(connection, "Close", 6) == 0) {
+            close(sock);
+        }
+    }
+
     map_destroy(&map);
     return 0;
+}
+
+int get_config(char *path) {
+    FILE *f = fopen(path, "r");
+    if(f == NULL) {
+        return CONFIG_NOTFOUND;
+    }
+
+    char spath[128], stype[128], sact[128];
+    char buff[512];
+
+    while(fgets(buff, 512, f)) {
+        if(buff[0] == '#') {
+            continue;
+        }
+
+        int r = sscanf(buff, "%s %s %s\n", spath, stype, sact);
+        if(r != 3) {
+            continue;
+        }
+
+        struct CONFIG_PATH config_path;
+        config_path.content_type = malloc(strlen(stype) + 1);
+        if(config_path.content_type == NULL) {
+            return CONFIG_MALLOC_ERROR;
+        }
+        strcpy(config_path.content_type, stype);
+
+        config_path.action = malloc(strlen(sact) + 1);
+        if(config_path.action == NULL) {
+            free(config_path.content_type);
+            return CONFIG_MALLOC_ERROR;
+        }
+        strcpy(config_path.action, sact);
+        map_add(&config, spath, strlen(spath), &config_path, sizeof(struct CONFIG_PATH));
+    }
+
+    fclose(f);
+    return 1;
 }
 
 void usage(char *argv0) {
@@ -253,12 +344,12 @@ void usage(char *argv0) {
 int main(int argc, char *argv[]) {
     int workers = 0;
     uint16_t port = 0;
+    char config_path[PATH_MAX] = "tinyhttp.conf";
     char str[INET_ADDRSTRLEN];
-    char root[PATH_MAX] = {0};
 
     extern char *optarg;
     int opt;
-    while((opt = getopt(argc, argv, "vw:p:r:h")) > 0) {
+    while((opt = getopt(argc, argv, "vw:p:r:c:h")) > 0) {
         switch(opt) {
             case 'v':
                 verbose = 1;
@@ -277,6 +368,9 @@ int main(int argc, char *argv[]) {
                     return 1;
                 }
                 close(tmp);
+                break;
+            case 'c':
+                strcpy(config_path, optarg);
                 break;
             case 'h':
                 usage(argv[0]);
@@ -300,6 +394,12 @@ int main(int argc, char *argv[]) {
     if(root[tmp] != '/') {
         root[tmp + 1] = '/';
         root[tmp + 2] = '\x0';
+    }
+
+    int cr = get_config(config_path);
+    if(cr < 0) {
+        printf("Can't read config file %s (exit code: %i)\n", config_path, cr);
+        return 1;
     }
 
     char *buffer = malloc(RECV_BUFFER_SIZE);
@@ -430,12 +530,12 @@ int main(int argc, char *argv[]) {
                     epoll_ctl(epollfd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
                     close(events[i].data.fd);
                 }
-                else if(recvd == -1) {
-                    if(verbose) {
-                        printf("pid %i recv() error fd = %i\n", pid, events[i].data.fd);
-                    }
-                    continue;
-                }
+                // else if(recvd == -1) {
+                //     if(verbose) {
+                //         printf("pid %i recv() error fd = %i\n", pid, events[i].data.fd);
+                //     }
+                //     continue;
+                // }
             }
         }
     }

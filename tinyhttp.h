@@ -1,3 +1,5 @@
+// Copyright (C) 2024 Aleksei Rogov <alekzzzr@gmail.com>. All rights reserved.
+
 #define SERVER_NAME "tinyhttp"
 
 #define RECV_BUFFER_SIZE (4096)
@@ -10,14 +12,6 @@
 #define MAX_EVENTS    200
 #define HTTP11_SIGNATURE 0x312e312F50545448
 
-#define REQUEST_EMPTY                 -1
-#define REQUEST_INVALID               -2
-#define REQUEST_INVALID_PATH          -3
-#define REQUEST_UNSUPPORTED           -4
-#define REQUEST_INVALID_HEADERS       -5
-#define REQUEST_METHOD_UNSUPPORTED    -6
-#define REQUEST_PROTOCOL_UNSUPPORTED  -7
-
 #define RESPONSE_100  0
 #define RESPONSE_200  1
 #define RESPONSE_400  2
@@ -28,6 +22,18 @@
 #define RESPONSE_500  7
 #define RESPONSE_501  8
 #define RESPONSE_502  9
+
+#define REQUEST_EMPTY                 -1
+#define REQUEST_INVALID               -2
+#define REQUEST_INVALID_PATH          -3
+#define REQUEST_UNSUPPORTED           -4
+#define REQUEST_INVALID_HEADERS       -5
+#define REQUEST_METHOD_UNSUPPORTED    -6
+#define REQUEST_PROTOCOL_UNSUPPORTED  -7
+
+#define CONFIG_NOTFOUND      -1
+#define CONFIG_INCORRECT     -2
+#define CONFIG_MALLOC_ERROR  -3
 
 
 typedef struct {
@@ -60,15 +66,26 @@ typedef struct {
     char *version;
 } request_t;
 
-char *responses[] = {
-    "100 Continue",
-    "200 OK",
-    "400 Bad Request",
-    "401 Unauthorized",
-    "403 Forbidden",
-    "404 Not Found",
-    "405 Method Not Allowed",
-    "500 Internal Server Error",
-    "501 Not Implemented",
-    "502 Bad Gateway"
+typedef struct {
+    char *msg;
+    int msg_len;
+    int code;
+} responses_t;
+
+responses_t responses[] = {
+    {"100 Continue", 12, 100},
+    {"200 OK", 6, 200},
+    {"400 Bad Request", 15, 400},
+    {"401 Unauthorized", 16, 401},
+    {"403 Forbidden", 13, 403},
+    {"404 Not Found", 13, 404},
+    {"405 Method Not Allowed", 22, 405},
+    {"500 Internal Server Error", 25, 500},
+    {"501 Not Implemented", 19, 501},
+    {"502 Bad Gateway", 15, 502}
+};
+
+struct CONFIG_PATH {
+    char *content_type;
+    char *action;
 };
