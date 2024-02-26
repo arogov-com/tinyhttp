@@ -1,18 +1,13 @@
 PROJECT := tinyhttp
 SOURCE := tinyhttp.c map.c
+HEADERS := tinyhttp.h map.h
 CC := gcc
 CFLAGS := -Wall -Os
 
 default: $(PROJECT)
 
-$(PROJECT): $(SOURCE)
+$(PROJECT): $(SOURCE) $(HEADERS)
 	$(CC) $(CFLAGS) -o $(PROJECT) $(SOURCE)
 
 clean:
 	rm $(PROJECT)
-
-c:
-	curl http://localhost:9000/index.html
-
-nf:
-	curl http://localhost:9000/notfound

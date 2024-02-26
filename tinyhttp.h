@@ -5,11 +5,13 @@
 #define RECV_BUFFER_SIZE (4096)
 #define SEND_BUFFER_SIZE (4096)
 #define FILE_BUFFER_SIZE (1024 << 10)
+#define CGI_BUFFER_SIZE  (4096)
 
 #define DEFAULT_PORT  9000
 #define MAX_CLIENTS   SOMAXCONN
 #define WORKERS       4
 #define MAX_EVENTS    200
+
 #define HTTP11_SIGNATURE 0x312e312F50545448
 
 #define RESPONSE_100  0
@@ -35,6 +37,31 @@
 #define CONFIG_INCORRECT     -2
 #define CONFIG_MALLOC_ERROR  -3
 
+#define CGI_PIPE_ERROR  -1
+#define CGI_FORK_ERROR  -2
+#define CGI_EXEC_ERROR  -3
+
+#define PREDEF_ENV           17
+#define FCGI_ROLE            "FCGI_ROLE=RESPONDER"
+#define QUERY_STRING         "QUERY_STRING=%s"
+#define REQUEST_METHOD_GET   "REQUEST_METHOD=GET"
+#define REQUEST_METHOD_POST  "REQUEST_METHOD=POST"
+#define CONTENT_TYPE         "CONTENT_TYPE=%s"
+#define CONTENT_LENGTH       "CONTENT_LENGTH=%s"
+#define SCRIPT_NAME          "SCRIPT_NAME=%s"
+#define REQUEST_URI          "REQUEST_URI=%s?%s"
+#define GATEWAY_INTERFACE    "GATEWAY_INTERFACE=CGI/1.1"
+#define SERVER_SOFTWARE      "SERVER_SOFTWARE="SERVER_NAME
+#define REQUEST_SCHEME       "REQUEST_SCHEME=http"
+#define SERVER_PROTOCOL      "SERVER_PROTOCOL=HTTP/1.1"
+#define DOCUMENT_URI         "DOCUMENT_URI=%s"
+#define SCRIPT_FILENAME      "SCRIPT_FILENAME=%s%s"
+#define DOCUMENT_ROOT        "DOCUMENT_ROOT=%s"
+#define REMOTE_ADDR          "REMOTE_ADDR=%s"
+#define REMOTE_PORT          "REMOTE_PORT=%i"
+#define SERVER_ADDR          "SERVER_ADDR=%s"
+#define SERVER_PORT          "SERVER_PORT=%i"
+#define SERVER_HOST          "SERVER_NAME=%s"
 
 typedef struct {
     char name[10];
@@ -63,6 +90,7 @@ http_method_t http_methods[] = {
 typedef struct {
     uint8_t method;
     char *path;
+    char *query;
     char *version;
 } request_t;
 

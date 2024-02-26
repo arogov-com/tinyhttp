@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <linux/limits.h>
+#include <bits/local_lim.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -13,14 +14,169 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/epoll.h>
-#include <signal.h>
+#include <sys/wait.h>
 #include "tinyhttp.h"
 #include "map.h"
 
 
 uint8_t verbose = 0;
 char root[PATH_MAX] = {0};
+char host[HOST_NAME_MAX] = {0};
 struct MAP config = {.objects = NULL, .length = 0};
+
+char *cgi_str(char *str, int n) {
+    if(str == NULL) {
+        return NULL;
+    }
+    if(n == 0) {
+        return str;
+    }
+    while(n--) {
+        if(str[n] >= 'a' && str[n] <= 'z') {
+            str[n] = str[n] - 0x20;
+        }
+        else if(str[n] == '-') {
+            str[n] = '_';
+        }
+    }
+    return str;
+}
+
+char **cgi_env(struct MAP *map, request_t *req, int sock) {
+    char **env = malloc((map->count + 1 + PREDEF_ENV) * sizeof(void*));
+
+    char *query = malloc(4096);
+    char *script = malloc(4096);
+    char *uri = malloc(4096);
+    char *doc = malloc(4096);
+    char *doc_root = malloc(4096);
+    char *script_file = malloc(4096);
+    char *raddr = malloc(28);
+    char *rport = malloc(18);
+    char *saddr = malloc(28);
+    char *sport = malloc(18);
+    char *server_name = malloc(HOST_NAME_MAX + 14);
+
+    env[0] = FCGI_ROLE;
+    if(req->method == GET) {
+        env[1] = REQUEST_METHOD_GET;
+    }
+    else if(req->method == POST) {
+        env[1] = REQUEST_METHOD_POST;
+    }
+    env[2] = GATEWAY_INTERFACE;
+    env[3] = SERVER_SOFTWARE;
+    env[4] = REQUEST_SCHEME;
+    env[5] = SERVER_PROTOCOL;
+
+    snprintf(query, 4096, QUERY_STRING, req->query ? req->query : "");
+    env[6] = query;
+
+    snprintf(script, 4096, SCRIPT_NAME, req->path ? req->path : "");
+    env[7] = script;
+
+    snprintf(uri, 4096, REQUEST_URI, req->path ? req->path : "", req->query ? req->query : "");
+    env[8] = uri;
+
+    snprintf(doc, 4096, DOCUMENT_URI, req->path ? req->path : "");
+    env[9] = doc;
+
+    snprintf(script_file, 4096, SCRIPT_FILENAME, root, req->path);
+    env[10] = script_file;
+
+    snprintf(doc_root, 4096, DOCUMENT_ROOT, root);
+    env[11] = doc_root;
+
+    char str[INET_ADDRSTRLEN];
+    struct sockaddr address;
+    socklen_t address_len = 16;
+    if(getsockname(sock, &address, &address_len) != 0) {
+        return NULL;
+    }
+    inet_ntop(AF_INET, &((struct sockaddr_in*)&address)->sin_addr, str, INET_ADDRSTRLEN);
+    snprintf(saddr, 28, SERVER_ADDR, str);
+    snprintf(sport, 18, SERVER_PORT, htons(((struct sockaddr_in*)&address)->sin_port));
+
+    if(getpeername(sock, &address, &address_len) != 0) {
+        return NULL;
+    }
+    inet_ntop(AF_INET, &((struct sockaddr_in*)&address)->sin_addr, str, INET_ADDRSTRLEN);
+    snprintf(raddr, 28, REMOTE_ADDR, str);
+    snprintf(rport, 18, REMOTE_PORT, htons(((struct sockaddr_in*)&address)->sin_port));
+
+    env[12] = saddr;
+    env[13] = sport;
+    env[14] = raddr;
+    env[15] = rport;
+
+    snprintf(server_name, HOST_NAME_MAX + 14, SERVER_HOST, host);
+    env[16] = server_name;
+
+    map_get_objects_start(map);
+    for(int i = 0; i != map->count; ++i) {
+        struct MAP_OBJECT *obj = map_get_objects_next(map);
+
+        env[i + PREDEF_ENV] = malloc(obj->key_size + obj->value_size + 2 + 5);
+        strcpy(env[i + PREDEF_ENV], "HTTP_");
+        memcpy(env[i + PREDEF_ENV] + 5, obj->key, obj->key_size);
+        cgi_str(env[i + PREDEF_ENV] + 5, obj->key_size);
+        env[i + PREDEF_ENV][5 + obj->key_size] = '=';
+
+        memcpy(env[i + PREDEF_ENV] + obj->key_size + 1 + 5, obj->value, obj->value_size);
+        env[i + PREDEF_ENV][5 + obj->key_size + 2 + obj->value_size] = 0;
+    }
+    env[map->count + 1 + PREDEF_ENV] = NULL;
+
+    return env;
+}
+
+int cgi_run(const char *command, int timeout, char *out_buffer, int out_buffer_size, int sock, struct MAP *map, request_t *req) {
+    int pipefd[2];
+    if(pipe(pipefd) < 0) {
+        return CGI_PIPE_ERROR;
+    }
+
+    pid_t pid = fork();
+    if(pid == -1) {
+        return CGI_FORK_ERROR;
+    }
+
+    if(pid == 0) {
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+
+        char **p = cgi_env(map, req, sock);
+
+        if(execle(command, command, NULL, p) == -1) {
+            return CGI_EXEC_ERROR;
+        }
+    }
+
+    int child_done = 0;
+    while(timeout--) {
+        int res = waitpid(pid, NULL, WNOHANG);
+        if(res != 0) {
+            child_done = 1;
+            break;
+        }
+        usleep(100000);
+    }
+
+    if(timeout <= 0) {
+        kill(pid, 9);
+    }
+    else if(child_done) {
+        int status;
+        wait(&status);
+    }
+
+    close(pipefd[1]);
+    int rd = read(pipefd[0], out_buffer, out_buffer_size);
+    close(pipefd[0]);
+
+    return rd;
+}
 
 int response(int code, int sock, char *data, unsigned int data_len, char *content_type) {
     if(sock <= 0) {
@@ -71,9 +227,7 @@ void http_get(request_t *req, struct MAP *map, int sock, char *data, size_t data
         }
     }
     else if(map_get(&config, req->path, strrchr(req->path, '/') - req->path + 1, &config_path, sizeof(struct CONFIG_PATH)) > 0) {
-        if(strcmp(config_path.action, "fastcgi") != 0 ) {
             strcpy(pt, req->path + 1);
-        }
     }
     else {
         int rsz = response(RESPONSE_403, sock, responses[RESPONSE_403].msg, responses[RESPONSE_403].msg_len, "text/html");
@@ -124,10 +278,33 @@ void http_get(request_t *req, struct MAP *map, int sock, char *data, size_t data
         free(file_buff);
     }
     else {
-        int rsz = response(RESPONSE_502, sock, responses[RESPONSE_502].msg, responses[RESPONSE_502].msg_len, "text/html");
+        char *cgi_buff = malloc(CGI_BUFFER_SIZE);
+        if(cgi_buff == NULL) {
+            int rsz = response(RESPONSE_500, sock, responses[RESPONSE_500].msg, responses[RESPONSE_500].msg_len, "text/html");
+            if(verbose) {
+                printf("500 %i ", rsz);
+            }
+            free(cgi_buff);
+            free(file_path);
+            return;
+        }
+
+        int rd = cgi_run(file_path, 200, cgi_buff, CGI_BUFFER_SIZE, sock, map, req);
+        if(rd <= 0) {
+            int rsz = response(RESPONSE_502, sock, responses[RESPONSE_502].msg, responses[RESPONSE_502].msg_len, "text/html");
+            if(verbose) {
+                printf("502 %i ", rsz);
+            }
+            free(cgi_buff);
+            free(file_path);
+            return;
+        }
+
+        int rsz = response(RESPONSE_200, sock, cgi_buff, rd, config_path.content_type);
+        free(cgi_buff);
+
         if(verbose) {
-            // Execute command, and return stdout
-            printf("502 %i ", rsz);
+            printf("200 %i ", rsz);
         }
     }
 
@@ -183,6 +360,12 @@ int http_request(char *data, int data_length, int sock) {
     *tmp = 0;
     length -= tmp - data + 1;
     data = tmp + 1;
+
+    req.query = memchr(req.path, '?', tmp - req.path);
+    if(req.query) {
+        *req.query = 0;
+        ++req.query;
+    }
 
     if(length == 0) {
         if(verbose) {
@@ -265,8 +448,9 @@ int http_request(char *data, int data_length, int sock) {
             http_post(&req, &map, sock, data, length);
             break;
         default:
+            int rsz = response(RESPONSE_405, sock, responses[RESPONSE_405].msg, responses[RESPONSE_405].msg_len, "text/html");
             if(verbose) {
-                printf("unsupported method ");
+                printf("405 %i ", rsz);
             }
             return REQUEST_METHOD_UNSUPPORTED;
     }
@@ -349,7 +533,7 @@ int main(int argc, char *argv[]) {
 
     extern char *optarg;
     int opt;
-    while((opt = getopt(argc, argv, "vw:p:r:c:h")) > 0) {
+    while((opt = getopt(argc, argv, "vw:p:r:c:n:h")) > 0) {
         switch(opt) {
             case 'v':
                 verbose = 1;
@@ -371,6 +555,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'c':
                 strcpy(config_path, optarg);
+                break;
+            case 'n':
+                strcpy(host, optarg);
                 break;
             case 'h':
                 usage(argv[0]);
@@ -394,6 +581,10 @@ int main(int argc, char *argv[]) {
     if(root[tmp] != '/') {
         root[tmp + 1] = '/';
         root[tmp + 2] = '\x0';
+    }
+    if(host[0] == '\x0' && gethostname(host, sizeof(host)) == -1) {
+        printf("Can't get hostname\n");
+        return 1;
     }
 
     int cr = get_config(config_path);
@@ -439,9 +630,9 @@ int main(int argc, char *argv[]) {
     epollfd = epoll_create1(0);
     if(epollfd == -1) {
         perror("epoll_create1() error");
+        close(epollfd);
         close(sock);
         free(buffer);
-        close(epollfd);
         return 1;
     }
 
@@ -449,9 +640,9 @@ int main(int argc, char *argv[]) {
     ev.data.fd = sock;
     if(epoll_ctl(epollfd, EPOLL_CTL_ADD, sock, &ev) == -1) {
         perror("epoll_ctl() sock");
+        close(epollfd);
         close(sock);
         free(buffer);
-        close(epollfd);
         return 1;
     }
 
@@ -465,14 +656,14 @@ int main(int argc, char *argv[]) {
 
     while(1) {
         struct sockaddr client_addr;
-        socklen_t client_addr_len;
+        socklen_t client_addr_len = INET_ADDRSTRLEN;
 
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if(nfds == -1) {
             perror("epoll_wait() error");
+            close(epollfd);
             close(sock);
             free(buffer);
-            close(epollfd);
             return 1;
         }
         for(int i = 0; i != nfds; ++i) {
@@ -500,7 +691,6 @@ int main(int argc, char *argv[]) {
                     perror("epoll_ctl(..., EPOLL_CTL_ADD, ...) error");
                     continue;
                 }
-                // printf("%i accept %i\n", pid, client_socket);
             }
             else {
                 int recvd = recv(events[i].data.fd, buffer, RECV_BUFFER_SIZE, 0);
@@ -526,16 +716,9 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else if(recvd == 0) {
-                    // printf("%i recv0 close %i\n", pid, events[i].data.fd);
                     epoll_ctl(epollfd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
                     close(events[i].data.fd);
                 }
-                // else if(recvd == -1) {
-                //     if(verbose) {
-                //         printf("pid %i recv() error fd = %i\n", pid, events[i].data.fd);
-                //     }
-                //     continue;
-                // }
             }
         }
     }
